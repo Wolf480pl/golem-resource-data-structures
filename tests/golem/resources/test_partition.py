@@ -102,3 +102,27 @@ def test_indexed_copy(temp_dir):
     for path_0, path_1 in zip(paths_0, paths_1):
         assert _sha256_file(path_0) == _sha256_file(path_1)
 
+def test_stream_copy(temp_dir):
+    sizes = [32145, 123, 1252336, 0, 412123, 213, 532390, 12]
+
+    paths_0 = _create_files(temp_dir, 'partition_0', sizes)
+    partition_0 = Partition(paths_0)
+
+    paths_1 = _create_paths(temp_dir, 'partition_1', len(sizes))
+    partition_1 = Partition.allocate(paths_1, sizes)
+
+    partition_0.open()
+    partition_1.open()
+
+    try:
+        for i in range(partition_0.size()):
+            data = partition_0.get_stream(i).read(-1)
+            partition_1.get_stream(i).write(data)
+    finally:
+
+        partition_0.close()
+        partition_1.close()
+
+    for path_0, path_1 in zip(paths_0, paths_1):
+        assert _sha256_file(path_0) == _sha256_file(path_1)
+
