@@ -37,14 +37,15 @@ class Partition(object):
 
     file_wrapper = GeventFileWrapper
 
-    def __init__(self, paths, chunk_size=DEFAULT_CHUNK_SIZE):
+    def __init__(self, paths, sizes=None, chunk_size=DEFAULT_CHUNK_SIZE):
 
         assert isinstance(paths, collections.Sequence)
         assert len(paths) > 0
         assert chunk_size > 0
 
         # Read file sizes
-        sizes = [os.path.getsize(p) for p in paths]
+        if sizes is None:
+            sizes = [os.path.getsize(p) for p in paths]
 
         # Structure
         self._paths = paths
@@ -61,8 +62,8 @@ class Partition(object):
         self._locks = [RLock()] * len(self._sizes)
         self._open = False
 
-    @staticmethod
-    def allocate(paths, sizes, chunk_size=DEFAULT_CHUNK_SIZE,
+    @classmethod
+    def allocate(cls, paths, sizes, chunk_size=DEFAULT_CHUNK_SIZE,
                  fill=b'0', data_size=65536):
         """ Allocates disk space for files.
             Creates a new Partition instance.  """
@@ -80,7 +81,21 @@ class Partition(object):
                     length = min(data_size, size - written)
                     written += out.write(data[:length])
 
-        return Partition(paths, chunk_size=chunk_size)
+        return cls(paths, chunk_size=chunk_size)
+
+    @classmethod
+    def create_thin(cls, paths, sizes, chunk_size=DEFAULT_CHUNK_SIZE):
+        """ Creates a new partition with files with specified sizes,
+            without explicitly allocating disk space. """
+        for path in paths:
+            # Create directories
+            dir_path = os.path.dirname(path)
+            os.makedirs(dir_path, exist_ok=True)
+
+            # Create empty file
+            open(path, 'a+b').close()
+
+        return cls(paths, sizes, chunk_size=chunk_size)
 
     def merkle(self):
         """ Creates a Merkle tree from chunks """
