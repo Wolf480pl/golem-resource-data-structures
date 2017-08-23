@@ -2,6 +2,7 @@ import collections
 import math
 import merkle
 import os
+import io
 
 from golem.collections.bitarray import BitArray
 from gevent.fileobject import FileObjectThread
@@ -26,6 +27,50 @@ class GeventFileWrapper(FileWrapper):
 
         from gevent.fileobject import FileObjectThread
         return FileObjectThread(fd, mode)
+
+
+class ChunkStream(io.BufferedIOBase):
+    def __init__(self, partition, chunk_num):
+        self._partition = partition
+        self._chunk_num = chunk_num
+        self._length = partition._chunk_size
+        self._off = 0
+
+    def __read(self, size, one_call=False):
+        # TODO: Respect one_call=True and call at most one read1 on the underlying files
+        if size < 0:
+            size = self._length
+        size = min(self._length - self._off, size)
+        data = self._partition.read(self._chunk_num, size, self._off)
+        self._off += len(data)
+        return data
+
+    def read(self, size=-1):
+        return self.__read(size)
+
+    def read1(self, size=-1):
+        return self.__read(size, one_call=True)
+
+    def write(self, data):
+        if len(data) > self._length - self._off:
+            raise IndexError
+        size = self._partition.write(self._chunk_num, data, self._off)
+        self._off += size
+        return size
+
+    def flush(self):
+        super(ChunkStream, self).flush()
+        self.fh.flush()
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        assert whence in [0, 1, 2]
+        if whence == 0:
+            self.off = offset
+        elif whence == 1:
+            self.off += offset
+        elif whence == 2:
+            self.off = max(self.length, self.length + offset)
+        return self.off
 
 
 class Partition(object):
@@ -104,9 +149,13 @@ class Partition(object):
         """ Returns the number of chunks """
         return int(math.ceil(self._size / self._chunk_size))
 
-    def offset(self, chunk_num):
+    def offset(self, chunk_num, extra_offset=0):
         """ Returns the file index and offset of a chunk with given number """
-        offset = chunk_num * self._chunk_size
+        
+        if not 0 <= extra_offset <= self._chunk_size:
+            raise IndexError('extra_offset out of range')
+
+        offset = chunk_num * self._chunk_size + extra_offset
 
         if not 0 <= offset <= self._size:
             raise IndexError('Index out of range')
@@ -149,6 +198,11 @@ class Partition(object):
         idx, offset = self.offset(chunk_num)
         return self.__write(idx, offset, data)[0]
 
+    def get_stream(self, chunk_num):
+        if not 0 <= chunk_num < self.size():
+            raise IndexError('chunk_num out of range')
+        return ChunkStream(self, chunk_num)
+
     def __iter__(self):
         self._iter_offset = 0
         self._iter_idx = 0
@@ -168,24 +222,35 @@ class Partition(object):
 
         return chunk
 
-    def __read(self, idx, offset):
+    def read(self, chunk_num, length=-1, extra_offset=0):
+        idx, offset = self.offset(chunk_num, extra_offset)
+        return self.__read(idx, offset, length)[0]
+
+    def write(self, chunk_num, data, extra_offset=0):
+        idx, offset = self.offset(chunk_num, extra_offset)
+        return self.__write(idx, offset, data)[0]
+
+    def __read(self, idx, offset, length=-1):
 
         read = 0
         chunk = None
         source = self._files[idx]
 
-        while read < self._chunk_size:
+        if length < 0:
+            length = self._chunk_size
+
+        while read < length:
 
             with self._locks[idx]:
                 if source.tell() != offset:
                     source.seek(offset)
-                buf = source.read(self._chunk_size - read)
+                buf = source.read(length - read)
 
             chunk = chunk + buf if chunk else buf
             read += len(buf)
             offset += len(buf)
 
-            is_enough = len(chunk) == self._chunk_size
+            is_enough = len(chunk) == length
             is_end = idx + 1 == len(self._sizes)
             if is_enough or is_end:
                 break
